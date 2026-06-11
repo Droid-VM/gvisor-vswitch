@@ -17,6 +17,15 @@ control: REST API (tcp/unix socket) ────────┘        │      
 ## 建置
 
 ```sh
+./build.sh                # 一鍵：同步 slirpnetstack + build -> ./gvswitch
+./build.sh android        # 靜態 linux/arm64 -> ./gvswitch-android-arm64
+./build.sh amd64          # 靜態 linux/amd64 -> ./gvswitch-linux-amd64
+./build.sh all            # 以上全部
+```
+
+或分步驟：
+
+```sh
 ./sync-slirpnetstack.sh   # 同步 slirpnetstack 並轉成 library（首次與升級時）
 make build                # 或 go build ./cmd/gvswitch
 ```
