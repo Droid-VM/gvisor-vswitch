@@ -97,8 +97,8 @@ func (d *NetDevice) serve() {
 		if err != nil {
 			return
 		}
+		// handle owns m.fds and closes them exactly once.
 		if err := d.handle(m); err != nil {
-			closeFds(m.fds)
 			return
 		}
 	}
@@ -110,6 +110,15 @@ func (d *NetDevice) mrgRxbufLocked() bool {
 }
 
 func (d *NetDevice) handle(m *message) error {
+	// handle owns m.fds: paths that keep an fd take it out of m.fds, and
+	// whatever remains (including stray fds on messages that should not
+	// carry any) is closed exactly once here. Nothing else may close them;
+	// a second close could hit an unrelated fd reusing the same number.
+	defer func() {
+		closeFds(m.fds)
+		m.fds = nil
+	}()
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
@@ -137,8 +146,11 @@ func (d *NetDevice) handle(m *message) error {
 			d.protoFeatures = binary.LittleEndian.Uint64(m.payload)
 		}
 
-	case reqSetOwner, reqSetVringErr, reqSetLogBase, reqSetLogFD:
-		closeFds(m.fds)
+	case reqSetOwner, reqSetVringErr:
+		// Accepted no-ops; any attached fds are closed by the deferred
+		// cleanup. SET_LOG_BASE/SET_LOG_FD are *not* no-ops: LOG_SHMFD is
+		// not offered, and SET_LOG_BASE expects a reply, so swallowing it
+		// would hang the front-end. They fall through to the default.
 
 	case reqResetOwner:
 		for _, v := range d.rings {
@@ -175,6 +187,10 @@ func (d *NetDevice) handle(m *message) error {
 				binary.LittleEndian.PutUint32(out[0:4], idx)
 				binary.LittleEndian.PutUint32(out[4:8], uint32(v.lastAvail))
 				reply, hasReply = out, true
+			} else {
+				// The front-end blocks on this reply; failing the session
+				// (EOF) beats leaving it hung with no answer.
+				err = fmt.Errorf("bad vring index %d", idx)
 			}
 		}
 
@@ -201,19 +217,27 @@ func (d *NetDevice) handle(m *message) error {
 		}
 
 	default:
-		closeFds(m.fds)
+		// Unknown or unsupported request. Some of these (the GET family)
+		// expect a reply we cannot produce; erroring out closes the
+		// session so the front-end sees EOF instead of hanging. This
+		// matches rust-vmm, where unknown messages fail the connection.
+		err = fmt.Errorf("unsupported request %d", m.req)
 	}
 
 	if hasReply {
 		return writeReply(d.conn, m.req, reply)
 	}
-	// REPLY_ACK: requests carrying NEED_REPLY expect a u64 status.
+	// REPLY_ACK: requests carrying NEED_REPLY expect a u64 status. The
+	// status reports the outcome; the error still propagates (failing the
+	// session), matching the reference implementation.
 	if m.flags&flagNeedReply != 0 && d.protoFeatures&protoFeatReplyAck != 0 {
 		status := uint64(0)
 		if err != nil {
 			status = 1
 		}
-		return writeReply(d.conn, m.req, u64Payload(status))
+		if werr := writeReply(d.conn, m.req, u64Payload(status)); werr != nil {
+			return werr
+		}
 	}
 	return err
 }
@@ -226,8 +250,9 @@ func (d *NetDevice) ring(idx uint32) *vring {
 }
 
 func (d *NetDevice) setMemTableLocked(m *message) error {
+	// The fds are only needed for the mmap calls; handle's deferred
+	// cleanup closes them afterwards (the mappings stay valid).
 	t, err := parseMemTable(m.payload, m.fds)
-	closeFds(m.fds) // regions stay mapped; fds are no longer needed
 	if err != nil {
 		return err
 	}
@@ -275,14 +300,12 @@ func (d *NetDevice) setVringAddrLocked(payload []byte) error {
 
 func (d *NetDevice) setVringFDLocked(m *message, isKick bool) error {
 	if len(m.payload) < 8 {
-		closeFds(m.fds)
 		return fmt.Errorf("short vring fd payload")
 	}
 	val := binary.LittleEndian.Uint64(m.payload)
 	idx := uint32(val & vringIdxMask)
 	v := d.ring(idx)
 	if v == nil {
-		closeFds(m.fds)
 		return fmt.Errorf("bad vring index %d", idx)
 	}
 
@@ -296,8 +319,10 @@ func (d *NetDevice) setVringFDLocked(m *message, isKick bool) error {
 		if isKick {
 			name = "vhost-kick"
 		}
+		// Take ownership of fds[0]; the rest stay on m.fds for the
+		// deferred cleanup.
 		f = os.NewFile(uintptr(m.fds[0]), name)
-		closeFds(m.fds[1:])
+		m.fds = m.fds[1:]
 	}
 
 	if isKick {
@@ -336,6 +361,14 @@ func (d *NetDevice) evalRingLocked(idx uint32, v *vring) {
 		if !v.pumpRunning {
 			v.pumpRunning = true
 			go d.txPump(v, v.kick)
+		} else {
+			// The pump keeps reading the kick eventfd while the ring is
+			// paused (SET_VRING_ENABLE(0)), so guest kicks from that
+			// window were consumed without draining. Poke the eventfd so
+			// chains queued during the pause are processed now.
+			var one [8]byte
+			one[0] = 1
+			v.kick.Write(one[:])
 		}
 		if d.handlers.State != nil {
 			go d.handlers.State(true)

@@ -63,7 +63,9 @@ const supportedProtocolFeatures = protoFeatReplyAck
 const (
 	hdrSize        = 12
 	maxPayloadSize = 4096
-	maxInFds       = 16
+	// maxInFds matches rust-vmm's MAX_ATTACHED_FD_ENTRIES: SET_MEM_TABLE
+	// carries one fd per region, up to 32 regions.
+	maxInFds = 32
 
 	// invalidFDFlag in a u64 vring-fd payload means "no fd attached".
 	invalidFDFlag = 0x100

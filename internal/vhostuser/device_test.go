@@ -97,9 +97,14 @@ func newFakeFrontEnd(t *testing.T) (*fakeFrontEnd, *net.UnixConn) {
 
 func (fe *fakeFrontEnd) send(req uint32, payload []byte, fds ...int) {
 	fe.t.Helper()
+	fe.sendFlags(req, flagVersion1, payload, fds...)
+}
+
+func (fe *fakeFrontEnd) sendFlags(req, flags uint32, payload []byte, fds ...int) {
+	fe.t.Helper()
 	hdr := make([]byte, hdrSize+len(payload))
 	binary.LittleEndian.PutUint32(hdr[0:4], req)
-	binary.LittleEndian.PutUint32(hdr[4:8], flagVersion1)
+	binary.LittleEndian.PutUint32(hdr[4:8], flags)
 	binary.LittleEndian.PutUint32(hdr[8:12], uint32(len(payload)))
 	copy(hdr[hdrSize:], payload)
 	var oob []byte
@@ -109,6 +114,14 @@ func (fe *fakeFrontEnd) send(req uint32, payload []byte, fds ...int) {
 	if _, _, err := fe.conn.WriteMsgUnix(hdr, oob, nil); err != nil {
 		fe.t.Fatalf("send req %d: %v", req, err)
 	}
+}
+
+// sendSync sends req with NEED_REPLY and returns the REPLY_ACK status.
+// Requires protoFeatReplyAck to have been negotiated.
+func (fe *fakeFrontEnd) sendSync(req uint32, payload []byte, fds ...int) uint64 {
+	fe.t.Helper()
+	fe.sendFlags(req, flagVersion1|flagNeedReply, payload, fds...)
+	return binary.LittleEndian.Uint64(fe.recvReply(req))
 }
 
 func (fe *fakeFrontEnd) recvReply(req uint32) []byte {
@@ -370,6 +383,122 @@ func TestVhostUserTXAndRX(t *testing.T) {
 	// --- out of buffers: drop, not block ---
 	if dev.WriteFrame(testFrame(60, 0x11)) {
 		t.Fatal("WriteFrame succeeded with no buffers")
+	}
+}
+
+// A kick consumed while the ring is paused (SET_VRING_ENABLE(0)) must not
+// be lost: re-enabling the ring has to drain chains queued during the pause
+// without waiting for the guest's next kick.
+func TestVhostUserEnableResumesPendingTX(t *testing.T) {
+	fe, devConn := newFakeFrontEnd(t)
+
+	frames := make(chan []byte, 16)
+	states := make(chan bool, 16)
+	dev := NewNetDevice(devConn, Handlers{
+		Frame: func(f []byte) { frames <- f },
+		State: func(up bool) { states <- up },
+	})
+	defer dev.Close()
+
+	fe.setup()
+	waitFor(t, "dataplane up", func() bool {
+		select {
+		case up := <-states:
+			return up
+		default:
+			return false
+		}
+	})
+
+	// Pause the TX ring (synced via REPLY_ACK).
+	if st := fe.sendSync(reqSetVringEnable, u32u32(txQueue, 0)); st != 0 {
+		t.Fatalf("SET_VRING_ENABLE(0) status %d", st)
+	}
+
+	// Guest queues a frame and kicks while paused. Give the pump time to
+	// consume (and discard) the kick.
+	want := testFrame(60, 0x5a)
+	buf := fe.mem[feBufBase:]
+	for i := range buf[:virtioNetHdrSize] {
+		buf[i] = 0
+	}
+	copy(buf[virtioNetHdrSize:], want)
+	fe.writeDesc(txQueue, 0, feBufBase, uint32(virtioNetHdrSize+len(want)), 0, 0)
+	fe.offerChains(txQueue, 0)
+	fe.kickQueue(txQueue)
+	time.Sleep(100 * time.Millisecond)
+
+	select {
+	case <-frames:
+		t.Fatal("frame delivered while ring disabled")
+	default:
+	}
+
+	// Re-enable: the pending chain must be drained without another kick.
+	if st := fe.sendSync(reqSetVringEnable, u32u32(txQueue, 1)); st != 0 {
+		t.Fatalf("SET_VRING_ENABLE(1) status %d", st)
+	}
+	select {
+	case got := <-frames:
+		if !bytes.Equal(got, want) {
+			t.Fatalf("resumed TX frame mismatch: got %d bytes", len(got))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("pending TX not drained after SET_VRING_ENABLE(1)")
+	}
+	waitFor(t, "TX used", func() bool { return fe.usedIdx(txQueue) == 1 })
+}
+
+// SET_MEM_TABLE may carry up to 32 regions (rust-vmm MAX_ATTACHED_FD_ENTRIES);
+// all 32 fds must survive the SCM_RIGHTS receive path.
+func TestVhostUserMemTable32Regions(t *testing.T) {
+	fe, devConn := newFakeFrontEnd(t)
+
+	dev := NewNetDevice(devConn, Handlers{})
+	defer dev.Close()
+
+	fe.send(reqGetFeatures, nil)
+	fe.recvReply(reqGetFeatures)
+	fe.send(reqGetProtocolFeatures, nil)
+	fe.recvReply(reqGetProtocolFeatures)
+	fe.send(reqSetProtocolFeatures, u64Payload(protoFeatReplyAck))
+	fe.send(reqSetFeatures, u64Payload(featVersion1|featProtocolFeatures))
+
+	const n = 32
+	const regSize = 64 << 10 // 32 * 64KiB = 2MiB <= feMemSize
+	base := uint64(uintptr(unsafe.Pointer(&fe.mem[0])))
+	payload := make([]byte, 8+n*32)
+	binary.LittleEndian.PutUint32(payload[0:4], n)
+	fds := make([]int, n)
+	for i := 0; i < n; i++ {
+		off := uint64(i) * regSize
+		p := payload[8+i*32:]
+		binary.LittleEndian.PutUint64(p[0:8], feGPABase+off) // guest_phys_addr
+		binary.LittleEndian.PutUint64(p[8:16], regSize)      // size
+		binary.LittleEndian.PutUint64(p[16:24], base+off)    // userspace_addr
+		binary.LittleEndian.PutUint64(p[24:32], off)         // mmap_offset
+		fds[i] = fe.memfd
+	}
+	if st := fe.sendSync(reqSetMemTable, payload, fds...); st != 0 {
+		t.Fatalf("SET_MEM_TABLE with 32 regions failed: status %d", st)
+	}
+}
+
+// A GET request the device cannot answer must fail the session (EOF) rather
+// than leave the front-end blocked waiting for a reply.
+func TestVhostUserBadGetVringBaseClosesSession(t *testing.T) {
+	fe, devConn := newFakeFrontEnd(t)
+
+	dev := NewNetDevice(devConn, Handlers{})
+	defer dev.Close()
+
+	fe.send(reqGetVringBase, u32u32(99, 0))
+
+	fe.conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := fe.conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("expected EOF after bad GET_VRING_BASE, got data")
+	} else if os.IsTimeout(err) {
+		t.Fatal("session left hanging after bad GET_VRING_BASE")
 	}
 }
 
