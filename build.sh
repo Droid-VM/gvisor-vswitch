@@ -1,6 +1,8 @@
 #!/bin/bash
-# One-shot build: sync the slirpnetstack checkout (clone/pull + package
-# rename + overlay glue), then build gvswitch.
+# One-shot build. slirpnetstack is now a regular Go module dependency
+# (pinned in go.mod), so the build is a plain `go build` — no checkout
+# sync or package rename. The first build fetches the module; afterwards
+# it comes from the Go module cache.
 #
 #   ./build.sh            host build            -> ./gvswitch
 #   ./build.sh android    static linux/arm64    -> ./gvswitch-android-arm64
@@ -8,8 +10,6 @@
 #   ./build.sh all        all of the above
 set -euo pipefail
 cd "$(dirname "$0")"
-
-./sync-slirpnetstack.sh
 
 target="${1:-host}"
 case "$target" in
