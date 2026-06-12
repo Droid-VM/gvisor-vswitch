@@ -5,7 +5,7 @@ import (
 	"net"
 	"sort"
 
-	sns "github.com/cloudflare/slirpnetstack"
+	sns "github.com/KusakabeShi/slirpnetstack/pkg/slirpnetstack"
 )
 
 // ForwardRec describes one installed port forward.

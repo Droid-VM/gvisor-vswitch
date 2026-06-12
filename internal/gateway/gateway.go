@@ -10,7 +10,7 @@ import (
 	"net"
 	"sync"
 
-	sns "github.com/cloudflare/slirpnetstack"
+	sns "github.com/KusakabeShi/slirpnetstack/pkg/slirpnetstack"
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/link/channel"
@@ -164,10 +164,10 @@ func New(sw *switchcore.Switch, cfg Config) (*Gateway, error) {
 
 	gwAddrs := sns.NewLocalAddrs(linkLocal)
 	if cfg.IPv4 != nil {
-		sns.LocalAddrsAdd(gwAddrs, tcpip.AddrFromSlice(cfg.IPv4.Address.To4()))
+		gwAddrs.Add(tcpip.AddrFromSlice(cfg.IPv4.Address.To4()))
 	}
 	if cfg.IPv6 != nil {
-		sns.LocalAddrsAdd(gwAddrs, tcpip.AddrFromSlice(cfg.IPv6.Address.To16()))
+		gwAddrs.Add(tcpip.AddrFromSlice(cfg.IPv6.Address.To16()))
 	}
 
 	g := &Gateway{
