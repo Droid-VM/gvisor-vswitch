@@ -212,6 +212,13 @@ func New(sw *switchcore.Switch, cfg Config) (*Gateway, error) {
 
 	// Link chain: stack <- hostfilter <- ethernet <- channel.
 	g.ep = channel.New(channelQueueLen, cfg.MTU, tcpip.LinkAddress(cfg.MAC))
+	// Guests offload TCP/UDP checksums to the virtio NIC, so frames
+	// arriving through tap/af_xdp carry uncomputed (partial) checksums.
+	// This stack is that "hardware": skip RX checksum validation or every
+	// guest TCP/UDP segment is silently dropped (ICMP and the pre-stack
+	// DHCP handler are unaffected, which makes it look like a working
+	// network that resolves and connects nothing).
+	g.ep.LinkEPCapabilities |= stack.CapabilityRXChecksumOffload
 	var linkEP stack.LinkEndpoint = ethernet.New(g.ep)
 	linkEP = sns.NewHostFilter(linkEP, gwAddrs)
 
