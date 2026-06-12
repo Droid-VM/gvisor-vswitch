@@ -1,3 +1,5 @@
+github.com/KusakabeShi/slirpnetstack v0.0.0-20260612065046-0e1b341a5298 h1:+M11OoA8dXa/+vVhwvzEzbTOeNRO4ZHO6uCAWFb0TUg=
+github.com/KusakabeShi/slirpnetstack v0.0.0-20260612065046-0e1b341a5298/go.mod h1:OO8CT4xKCDa2tHmZ2AP7vCYuacyBSUfQ4QZ2FF5o+u0=
 github.com/cenkalti/backoff v2.2.1+incompatible h1:tNowT99t7UNflLxfYYSlKYsBpXdEet03Pg2g16Swow4=
 github.com/cenkalti/backoff v2.2.1+incompatible/go.mod h1:90ReRw6GdpyfrHakVjL/QHaoyV4aDUVVkXQJJJ3NXXM=
 github.com/cilium/ebpf v0.16.0 h1:+BiEnHL6Z7lXnlGUsXQPPAE7+kenAd4ES8MQ5min0Ok=

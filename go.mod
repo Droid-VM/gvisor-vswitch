@@ -3,7 +3,7 @@ module github.com/HuJK/gvisor-vswitch
 go 1.26.3
 
 require (
-	github.com/KusakabeShi/slirpnetstack v0.0.0-00010101000000-000000000000
+	github.com/KusakabeShi/slirpnetstack v0.0.0-20260612065046-0e1b341a5298
 	github.com/cilium/ebpf v0.16.0
 	github.com/insomniacslk/dhcp v0.0.0-20260603135910-a415979eb11e
 	github.com/mdlayher/vsock v1.3.0
@@ -33,5 +33,3 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/netaddr.v1 v1.5.1 // indirect
 )
-
-replace github.com/KusakabeShi/slirpnetstack => /root/gitrs/slirpnetstack
