@@ -1,5 +1,6 @@
 # Built binaries
 /build/
+/dist
 /gvswitch-*
 
 # slirpnetstack is a separate git checkout managed by sync-slirpnetstack.sh
